@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <GtfoInstall>F:\SteamLibrary\steamapps\common\GTFO</GtfoInstall>
+    <GameFolder>C:\Users\User\AppData\Roaming\r2modmanPlus-local\GTFO\profiles\miximum-dev</GameFolder>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+  </PropertyGroup>
+</Project>
