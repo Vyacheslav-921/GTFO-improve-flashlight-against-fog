@@ -30,8 +30,16 @@ public sealed class FlashlightFogCut : MonoBehaviour
 sealed class FogCutWork
 {
     const int MaxBeam = 12;
-    // The level has 32 fog spheres. The beam uses MaxBeam; leftover slots keep cleared spots after the light moves on.
-    const int MaxDrawn = 16;
+    // One chain per flashlight. Shared anti-fog keeps a second chain from carving where the first
+    // already covers, so these slots are the parts of the other beams that do not overlap.
+    const int MaxSamples = MaxBeam * 4;
+    // The level has 32 fog spheres. 24 are for the beam plus the spots it just left; the rest stay
+    // free for a repeller or turbine. A spot the light has left must keep its sphere, or the fog pops
+    // back in one frame and pops out again when a slot frees.
+    const int MaxDrawn = 24;
+    // A one-frame miss (weapon bob, a wall hit on a spacing boundary) must not start the return.
+    const float MissGrace = 0.12f;
+    const float EstablishedCharge = 0.35f;
     const float OriginBias = 0.35f;
     const float MinRadius = 0.2f;
     const float ChainStart = 0.45f;
@@ -61,7 +69,7 @@ sealed class FogCutWork
     readonly List<FogSphereAllocator> _pool = new List<FogSphereAllocator>(MaxDrawn);
     readonly SphereWrite[] _written = new SphereWrite[MaxDrawn];
     readonly WallCast[] _casts = new WallCast[8];
-    readonly Sample[] _samples = new Sample[MaxBeam];
+    readonly Sample[] _samples = new Sample[MaxSamples];
     readonly Site[] _sites = new Site[MaxSites];
 
     int _sampleCount;
@@ -102,6 +110,7 @@ sealed class FogCutWork
         public Vector3 Position;
         public float Radius;
         public float Density;
+        public int Beam;
     }
 
     struct Site
@@ -111,10 +120,12 @@ sealed class FogCutWork
         public float Density;
         public float Charge;
         public float AbsentFor;
+        public float Missed;
         public float Fade;
         public bool Alive;
         public bool Covered;
         public bool Drawn;
+        public int Beam;
     }
 
     public void Tick()
@@ -147,10 +158,12 @@ sealed class FogCutWork
 
             LogBudgetOnce();
             _sampleCount = 0;
+            bool shared = Plugin.CutShared.Value;
+            int cap = shared ? MaxSamples : MaxBeam;
             int count = agents.Count;
-            for (int pass = 0; pass < 2 && _sampleCount < MaxBeam; pass++)
+            for (int pass = 0; pass < 2 && _sampleCount < cap; pass++)
             {
-                for (int i = 0; i < count && _sampleCount < MaxBeam; i++)
+                for (int i = 0; i < count && _sampleCount < cap; i++)
                 {
                     PlayerAgent agent = agents[i];
                     if (agent == null)
@@ -162,7 +175,10 @@ sealed class FogCutWork
                         continue;
                     if (!TryGetBeam(agent, inventory, out Vector3 origin, out Vector3 direction, out float reach, out float brightness))
                         continue;
-                    PlaceChain(origin, direction, reach, brightness, density);
+                    int beam = agent.GetInstanceID();
+                    if (beam == 0)
+                        beam = i + 1;
+                    PlaceChain(origin, direction, reach, brightness, density, beam, shared);
                 }
             }
 
@@ -180,7 +196,8 @@ sealed class FogCutWork
             float recover = Plugin.CutReturn.Value;
             if (recover < 0f)
                 recover = 0f;
-            SettleSites(dt, delay, hold, recover);
+            SettleSites(dt, delay, hold, recover, shared);
+            FitTrail();
             WriteSites();
             ReleaseUnused();
         }
@@ -451,25 +468,35 @@ sealed class FogCutWork
         return false;
     }
 
-    void PlaceChain(Vector3 origin, Vector3 direction, float reach, float brightness, float density)
+    void PlaceChain(Vector3 origin, Vector3 direction, float reach, float brightness, float density, int beam, bool shared)
     {
         float span = reach - ChainStart;
-        int budget = MaxBeam - _sampleCount;
+        // Without sharing, every light appends into one chain budget, matching the old cap.
+        // With sharing, each light gets a full chain and the overlap is dropped when the holes are placed.
+        int budget = shared ? MaxBeam : MaxBeam - _sampleCount;
+        if (shared)
+        {
+            int room = MaxSamples - _sampleCount;
+            if (budget > room)
+                budget = room;
+        }
         if (span < MinRadius || budget <= 0)
             return;
+        int first = _sampleCount;
 
         float radius = TunnelRadius * Modifier(Plugin.CutRadius.Value);
-        int count = Mathf.CeilToInt(span / (radius * Overlap));
+        float spacing = radius * Overlap;
+        if (spacing < MinRadius)
+            spacing = MinRadius;
+        // Centers stay on a fixed spacing. Redistributing them whenever the wall distance changes
+        // moved every sphere off its cleared spot, spawned a new low-charge hole, and let the fog pop
+        // back into the spot the light had just cleared.
+        int count = Mathf.CeilToInt(span / spacing);
         if (count < 1)
             count = 1;
         if (count > budget)
             count = budget;
-        float step = span / count;
-        // A longer beam keeps a solid tunnel. Extra length widens spheres when the slot budget runs out,
-        // instead of leaving fog between them. That gap was the "couple of meters" of extra sight.
-        float needed = step * 0.85f;
-        if (radius < needed)
-            radius = needed;
+        float growCap = radius * 2.5f;
 
         bool changed = Mathf.Abs(_loggedBrightness - brightness) > 0.2f || Mathf.Abs(_loggedRange - _beamRange) > 2f;
         if (_beamLogs < 4 && (_beamLogs == 0 || changed))
@@ -489,9 +516,14 @@ sealed class FogCutWork
 
         for (int i = 0; i < count; i++)
         {
-            float center = ChainStart + step * (i + 0.5f);
+            float center = ChainStart + spacing * (i + 0.5f);
             if (center >= reach)
-                break;
+            {
+                if (i > 0)
+                    break;
+                center = ChainStart + span * 0.5f;
+            }
+
             float sphere = radius;
             float room = reach - center;
             if (sphere > room)
@@ -504,17 +536,86 @@ sealed class FogCutWork
                 Position = origin + direction * center,
                 Radius = sphere,
                 Density = density,
+                Beam = beam,
             };
             _sampleCount++;
         }
+
+        if (_sampleCount > first)
+        {
+            int last = _sampleCount - 1;
+            float along = Vector3.Dot(_samples[last].Position - origin, direction);
+            float cover = reach - along;
+            float sphere = _samples[last].Radius;
+            if (sphere < cover)
+                sphere = cover;
+            if (sphere > growCap)
+                sphere = growCap;
+            float room = reach - along;
+            if (sphere > room)
+                sphere = room;
+            if (sphere < MinRadius)
+                sphere = MinRadius;
+            _samples[last].Radius = sphere;
+        }
     }
 
-    static bool Hits(ref Site site, Vector3 position)
+    float HitLimit(ref Site site)
     {
-        float limit = site.Radius * 0.65f;
-        if (limit < 0.45f)
-            limit = 0.45f;
+        float spacing = TunnelRadius * Modifier(Plugin.CutRadius.Value) * Overlap;
+        if (spacing < MinRadius)
+            spacing = MinRadius;
+        // Wide enough that bob and a small reach change stay on the same spot, narrow enough
+        // that the next sphere along the beam still gets its own spot.
+        float cap = spacing * 0.62f;
+        float limit = site.Radius * 0.75f;
+        if (limit > cap)
+            limit = cap;
+        float floor = spacing * 0.35f;
+        if (floor < 0.35f)
+            floor = 0.35f;
+        if (floor > cap)
+            floor = cap;
+        if (limit < floor)
+            limit = floor;
+        return limit;
+    }
+
+    bool Hits(ref Site site, Vector3 position)
+    {
+        float limit = HitLimit(ref site);
         return (site.Position - position).sqrMagnitude <= limit * limit;
+    }
+
+    bool Represents(ref Site site, Vector3 position)
+    {
+        if (!site.Alive)
+            return false;
+        if (Hits(ref site, position))
+            return true;
+        if (site.Missed >= MissGrace)
+            return false;
+        float limit = site.Radius;
+        if (limit < 0.5f)
+            limit = 0.5f;
+        return (site.Position - position).sqrMagnitude <= limit * limit;
+    }
+
+    // True when another flashlight's hole already covers this sample.
+    // Centers of one chain sit just outside each other's radius, so this does not collapse a single beam.
+    static bool OtherBeamCovers(ref Site site, Vector3 position, float radius, int beam)
+    {
+        if (!site.Alive || site.Beam == 0 || beam == 0 || site.Beam == beam)
+            return false;
+        float reach = site.Radius;
+        if (reach < radius)
+            reach = radius;
+        return (site.Position - position).sqrMagnitude <= reach * reach;
+    }
+
+    static bool InBeam(ref Site site)
+    {
+        return site.Alive && (site.Covered || site.Missed < MissGrace);
     }
 
     static float ChargeStep(float delay, float dt)
@@ -524,7 +625,7 @@ sealed class FogCutWork
         return dt / delay;
     }
 
-    void SettleSites(float dt, float delay, float hold, float recover)
+    void SettleSites(float dt, float delay, float hold, float recover, bool shared)
     {
         for (int i = 0; i < MaxSites; i++)
             _sites[i].Covered = false;
@@ -534,15 +635,25 @@ sealed class FogCutWork
             Vector3 position = _samples[s].Position;
             float density = _samples[s].Density;
             float radius = _samples[s].Radius;
+            int beam = _samples[s].Beam;
             for (int i = 0; i < MaxSites; i++)
             {
                 ref Site site = ref _sites[i];
-                if (!site.Alive || !Hits(ref site, position))
+                if (!site.Alive)
+                    continue;
+                bool own = Hits(ref site, position);
+                bool other = shared && OtherBeamCovers(ref site, position, radius, beam);
+                if (!own && !other)
                     continue;
                 site.Covered = true;
+                // The other beam keeps this hole lit. It does not widen it or cut any harder.
+                if (other)
+                    continue;
                 site.Density = density;
                 if (radius > site.Radius)
                     site.Radius = radius;
+                if (site.Beam == 0)
+                    site.Beam = beam;
             }
         }
 
@@ -554,20 +665,32 @@ sealed class FogCutWork
                 continue;
             if (site.Covered)
             {
-                site.AbsentFor = 0f;
-                site.Fade = 1f;
+                site.Missed = 0f;
+                // Bring a returning spot back over a short ramp. Snapping it to a full clear makes
+                // the fog vanish and reappear when the beam grazes the edge of a cleared spot.
+                float restore = dt / 0.2f;
+                if (restore < step)
+                    restore = step;
+                if (restore > 1f)
+                    restore = 1f;
+                site.Fade += restore;
+                if (site.Fade > 1f)
+                    site.Fade = 1f;
                 site.Charge += step;
                 if (site.Charge > 1f)
                     site.Charge = 1f;
+                if (site.Fade >= 1f)
+                    site.AbsentFor = 0f;
             }
             else
             {
+                site.Missed += dt;
+                if (site.Missed < MissGrace)
+                    continue;
                 site.AbsentFor += dt;
                 // Hold the full clear, then let fog fill the same spot over the return period.
                 // Deleting the sphere on the deadline puts the fog back in one frame.
-                if (site.AbsentFor <= hold)
-                    site.Fade = 1f;
-                else
+                if (site.AbsentFor > hold)
                 {
                     float fadeTime = recover > 0.001f ? recover : 0.001f;
                     float t = (site.AbsentFor - hold) / fadeTime;
@@ -585,10 +708,15 @@ sealed class FogCutWork
         for (int s = 0; s < _sampleCount; s++)
         {
             Vector3 position = _samples[s].Position;
+            float radius = _samples[s].Radius;
+            int beam = _samples[s].Beam;
+            if (shared && CoveredByOtherBeam(position, radius, beam))
+                continue;
+
             bool represented = false;
             for (int i = 0; i < MaxSites; i++)
             {
-                if (_sites[i].Alive && Hits(ref _sites[i], position))
+                if (Represents(ref _sites[i], position))
                 {
                     represented = true;
                     break;
@@ -598,24 +726,35 @@ sealed class FogCutWork
             if (represented)
                 continue;
 
-            int slot = FreeSite();
-            if (slot < 0)
-                slot = EvictLingering();
+            int slot = MakeSlot();
             if (slot < 0)
                 continue;
 
             _sites[slot] = new Site
             {
                 Position = position,
-                Radius = _samples[s].Radius,
+                Radius = radius,
                 Density = _samples[s].Density,
                 Charge = step > 1f ? 1f : step,
                 AbsentFor = 0f,
+                Missed = 0f,
                 Fade = 1f,
                 Alive = true,
                 Covered = true,
+                Beam = beam,
             };
         }
+    }
+
+    bool CoveredByOtherBeam(Vector3 position, float radius, int beam)
+    {
+        for (int i = 0; i < MaxSites; i++)
+        {
+            if (OtherBeamCovers(ref _sites[i], position, radius, beam))
+                return true;
+        }
+
+        return false;
     }
 
     int FreeSite()
@@ -629,13 +768,28 @@ sealed class FogCutWork
         return -1;
     }
 
+    int MakeSlot()
+    {
+        int slot = FreeSite();
+        if (slot >= 0)
+            return slot;
+        if (TryMergeLingering())
+        {
+            slot = FreeSite();
+            if (slot >= 0)
+                return slot;
+        }
+
+        return EvictLingering();
+    }
+
     int EvictLingering()
     {
         int best = -1;
         float oldest = 0f;
         for (int i = 0; i < MaxSites; i++)
         {
-            if (!_sites[i].Alive || _sites[i].Covered)
+            if (!_sites[i].Alive || InBeam(ref _sites[i]))
                 continue;
             if (best >= 0 && _sites[i].AbsentFor <= oldest)
                 continue;
@@ -648,20 +802,139 @@ sealed class FogCutWork
         return best;
     }
 
+    static float DrawnRadius(ref Site site)
+    {
+        return site.Radius * site.Charge * Mathf.Lerp(0.65f, 1f, site.Fade);
+    }
+
+    static bool NeedsSphere(ref Site site)
+    {
+        return Visible(ref site) && DrawnRadius(ref site) >= 0.05f;
+    }
+
+    int BeamSlots()
+    {
+        int beam = 0;
+        for (int i = 0; i < MaxSites; i++)
+        {
+            if (InBeam(ref _sites[i]) && NeedsSphere(ref _sites[i]))
+                beam++;
+        }
+
+        return beam;
+    }
+
+    int LingeringSlots()
+    {
+        int lingering = 0;
+        for (int i = 0; i < MaxSites; i++)
+        {
+            if (!InBeam(ref _sites[i]) && NeedsSphere(ref _sites[i]))
+                lingering++;
+        }
+
+        return lingering;
+    }
+
+    void FitTrail()
+    {
+        int guard = MaxSites;
+        while (guard-- > 0)
+        {
+            int spare = MaxDrawn - BeamSlots();
+            if (spare < 0)
+                spare = 0;
+            if (LingeringSlots() <= spare)
+                return;
+            if (!TryMergeLingering())
+                return;
+        }
+    }
+
+    bool TryMergeLingering()
+    {
+        int a = -1;
+        int b = -1;
+        float best = 0f;
+        for (int i = 0; i < MaxSites; i++)
+        {
+            if (InBeam(ref _sites[i]) || !NeedsSphere(ref _sites[i]))
+                continue;
+            for (int j = i + 1; j < MaxSites; j++)
+            {
+                if (InBeam(ref _sites[j]) || !NeedsSphere(ref _sites[j]))
+                    continue;
+                float dist = Vector3.Distance(_sites[i].Position, _sites[j].Position);
+                float reach = _sites[i].Radius + _sites[j].Radius + 0.2f;
+                if (dist > reach)
+                    continue;
+                if (a >= 0 && dist >= best)
+                    continue;
+                a = i;
+                b = j;
+                best = dist;
+            }
+        }
+
+        if (a < 0)
+            return false;
+        Unite(a, b);
+        return true;
+    }
+
+    void Unite(int keep, int drop)
+    {
+        ref Site a = ref _sites[keep];
+        ref Site b = ref _sites[drop];
+        Vector3 delta = b.Position - a.Position;
+        float dist = delta.magnitude;
+        bool dropCoversKeep = dist < 0.001f || dist + a.Radius <= b.Radius;
+        bool separate = dist >= 0.001f && dist + b.Radius > a.Radius && dist + a.Radius > b.Radius;
+        if (dropCoversKeep && b.Radius > a.Radius)
+        {
+            a.Position = b.Position;
+            a.Radius = b.Radius;
+        }
+        else if (separate)
+        {
+            float radius = (dist + a.Radius + b.Radius) * 0.5f;
+            a.Position += delta * ((radius - a.Radius) / dist);
+            a.Radius = radius;
+        }
+
+        if (b.Charge > a.Charge)
+            a.Charge = b.Charge;
+        if (b.Fade > a.Fade)
+            a.Fade = b.Fade;
+        if (b.AbsentFor < a.AbsentFor)
+            a.AbsentFor = b.AbsentFor;
+        if (b.Missed < a.Missed)
+            a.Missed = b.Missed;
+        if (Mathf.Abs(b.Density) > Mathf.Abs(a.Density))
+            a.Density = b.Density;
+        if (b.Covered)
+            a.Covered = true;
+        b.Alive = false;
+    }
+
     void WriteSites()
     {
         for (int i = 0; i < MaxSites; i++)
             _sites[i].Drawn = false;
 
-        for (int i = 0; i < MaxSites && _used < MaxDrawn; i++)
-        {
-            ref Site site = ref _sites[i];
-            if (!site.Covered || !Visible(ref site))
-                continue;
-            if (!Draw(ref site))
-                return;
-        }
+        // Established clears go out before a brand-new low-charge hole. Otherwise the new beam
+        // steals every sphere and the fog pops back into the tunnel the light just left.
+        if (!DrawPass(true, true))
+            return;
+        if (!DrawPass(false, true))
+            return;
+        if (!DrawPass(true, false))
+            return;
+        DrawPass(false, false);
+    }
 
+    bool DrawPass(bool inBeam, bool established)
+    {
         while (_used < MaxDrawn)
         {
             int best = -1;
@@ -669,7 +942,9 @@ sealed class FogCutWork
             for (int i = 0; i < MaxSites; i++)
             {
                 ref Site site = ref _sites[i];
-                if (site.Covered || site.Drawn || !Visible(ref site))
+                if (site.Drawn || InBeam(ref site) != inBeam || !NeedsSphere(ref site))
+                    continue;
+                if ((site.Charge >= EstablishedCharge) != established)
                     continue;
                 if (best >= 0 && site.AbsentFor >= freshest)
                     continue;
@@ -678,10 +953,12 @@ sealed class FogCutWork
             }
 
             if (best < 0)
-                return;
+                return true;
             if (!Draw(ref _sites[best]))
-                return;
+                return false;
         }
+
+        return true;
     }
 
     static bool Visible(ref Site site)
@@ -692,7 +969,7 @@ sealed class FogCutWork
     bool Draw(ref Site site)
     {
         site.Drawn = true;
-        float radius = site.Radius * site.Charge * Mathf.Lerp(0.65f, 1f, site.Fade);
+        float radius = DrawnRadius(ref site);
         if (radius < 0.05f)
             return true;
         if (!Rent(out FogSphereAllocator allocator, out int slot))

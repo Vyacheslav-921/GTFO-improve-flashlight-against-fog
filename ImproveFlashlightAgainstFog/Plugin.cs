@@ -6,7 +6,7 @@ using Il2CppInterop.Runtime.Injection;
 
 namespace ImproveFlashlightAgainstFog;
 
-[BepInPlugin(Plugin.Guid, "Improve Flashlight Against Fog", "1.4.4")]
+[BepInPlugin(Plugin.Guid, "Improve Flashlight Against Fog", "1.4.6")]
 public sealed class Plugin : BasePlugin
 {
     public const string Guid = "improveflashlightagainstfog";
@@ -20,6 +20,7 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<float> CutDelay;
     internal static ConfigEntry<float> CutHold;
     internal static ConfigEntry<float> CutReturn;
+    internal static ConfigEntry<bool> CutShared;
 
     public override void Load()
     {
@@ -32,50 +33,57 @@ public sealed class Plugin : BasePlugin
         CutDensity = Config.Bind(
             "Flashlight",
             "Cut density",
-            -4f,
+            -6f,
             "How hard the beam clears fog. Negative values remove it. -4 is a full clear in normal infection fog; use a larger negative in heavier fog. If the beam makes fog thicker, flip the sign.");
         CutLength = Config.Bind(
             "Flashlight",
             "Cut length modifier",
-            1f,
+            1.5f,
             new ConfigDescription(
                 "Multiplies how far the flashlight clears fog. 1 keeps the distance from the light's brightness and throw. Walls still stop the carve.",
                 new AcceptableValueRange<float>(0.1f, 5f)));
         CutRadius = Config.Bind(
             "Flashlight",
             "Cut radius modifier",
-            1f,
+            1.2f,
             new ConfigDescription(
                 "Multiplies how wide the cleared tunnel is. 1 is the normal width. This does not change how far the carve reaches.",
                 new AcceptableValueRange<float>(0.1f, 5f)));
         CutDelay = Config.Bind(
             "Flashlight",
             "Anti-fog delay",
-            0.4f,
+            1.5f,
             new ConfigDescription(
                 "Seconds a lit spot takes to reach a full clear. The hole grows in that spot while the light is on it, and it does not slide with the beam. 0 uses the full size immediately.",
                 new AcceptableValueRange<float>(0f, 15f)));
-        float previous = 1.25f;
+        float holdDefault = 0f;
+        float returnDefault = 2.2f;
         if (Config.TryGetEntry("Flashlight", "Anti-fog persist period", out ConfigEntry<float> legacy))
         {
-            previous = legacy.Value;
+            holdDefault = legacy.Value;
+            returnDefault = legacy.Value;
             Config.Remove(legacy.Definition);
         }
 
         CutHold = Config.Bind(
             "Flashlight",
             "Anti-fog full clear",
-            previous,
+            holdDefault,
             new ConfigDescription(
                 "Seconds a spot stays fully clear after the flashlight leaves it. 0 starts the return as soon as the light moves off.",
                 new AcceptableValueRange<float>(0f, 15f)));
         CutReturn = Config.Bind(
             "Flashlight",
             "Anti-fog return period",
-            previous,
+            returnDefault,
             new ConfigDescription(
                 "Seconds fog takes to fill a spot back in after the full clear ends. 0 fills that spot back at once.",
                 new AcceptableValueRange<float>(0f, 15f)));
+        CutShared = Config.Bind(
+            "Flashlight",
+            "Shared anti-fog",
+            true,
+            "Flashlights that shine on the same place clear it once, at the strength and speed of a single beam. A beam that shines somewhere else still clears that place. Set this to false and every beam adds its own clear on the same spot.");
 
         ClassInjector.RegisterTypeInIl2Cpp<FlashlightFogCut>();
         AddComponent<FlashlightFogCut>();
