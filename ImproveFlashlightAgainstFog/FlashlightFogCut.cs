@@ -174,10 +174,13 @@ sealed class FogCutWork
             float delay = Plugin.CutDelay.Value;
             if (delay < 0f)
                 delay = 0f;
-            float persist = Plugin.CutPersist.Value;
-            if (persist < 0f)
-                persist = 0f;
-            SettleSites(dt, delay, persist);
+            float hold = Plugin.CutHold.Value;
+            if (hold < 0f)
+                hold = 0f;
+            float recover = Plugin.CutReturn.Value;
+            if (recover < 0f)
+                recover = 0f;
+            SettleSites(dt, delay, hold, recover);
             WriteSites();
             ReleaseUnused();
         }
@@ -521,7 +524,7 @@ sealed class FogCutWork
         return dt / delay;
     }
 
-    void SettleSites(float dt, float delay, float persist)
+    void SettleSites(float dt, float delay, float hold, float recover)
     {
         for (int i = 0; i < MaxSites; i++)
             _sites[i].Covered = false;
@@ -560,16 +563,14 @@ sealed class FogCutWork
             else
             {
                 site.AbsentFor += dt;
-                // Hold the full clear for the persist period, then let fog fill the same spot.
+                // Hold the full clear, then let fog fill the same spot over the return period.
                 // Deleting the sphere on the deadline puts the fog back in one frame.
-                float fadeTime = persist > 0.05f ? persist : 0.05f;
-                if (persist <= 0.001f)
-                    fadeTime = 0.001f;
-                if (site.AbsentFor <= persist)
+                if (site.AbsentFor <= hold)
                     site.Fade = 1f;
                 else
                 {
-                    float t = (site.AbsentFor - persist) / fadeTime;
+                    float fadeTime = recover > 0.001f ? recover : 0.001f;
+                    float t = (site.AbsentFor - hold) / fadeTime;
                     if (t >= 1f)
                     {
                         site.Fade = 0f;
