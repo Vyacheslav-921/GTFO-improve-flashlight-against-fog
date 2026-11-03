@@ -6,7 +6,7 @@ using Il2CppInterop.Runtime.Injection;
 
 namespace ImproveFlashlightAgainstFog;
 
-[BepInPlugin(Plugin.Guid, "Improve Flashlight Against Fog", "1.4.2")]
+[BepInPlugin(Plugin.Guid, "Improve Flashlight Against Fog", "1.4.3")]
 public sealed class Plugin : BasePlugin
 {
     public const string Guid = "improveflashlightagainstfog";
@@ -27,7 +27,7 @@ public sealed class Plugin : BasePlugin
             "Flashlight",
             "Cut fog in the beam",
             true,
-            "While a flashlight is on, carve infection fog along the beam the same way a fog repeller or heavy fog turbine does. How far the carve reaches follows the light's brightness. Anti-fog delay and Anti-fog persist period decide when a lit spot clears and how long it stays clear.");
+            "While a flashlight is on, carve infection fog along the beam the same way a fog repeller or heavy fog turbine does. How far the carve reaches follows the light's brightness and how far that light throws, so a long range flashlight clears farther than a weapon light. Anti-fog delay and Anti-fog persist period decide when a lit spot clears and how long it stays clear.");
         CutDensity = Config.Bind(
             "Flashlight",
             "Cut density",
@@ -38,7 +38,7 @@ public sealed class Plugin : BasePlugin
             "Cut length modifier",
             1f,
             new ConfigDescription(
-                "Multiplies how far the flashlight clears fog. 1 keeps the brightness-based distance. Walls still stop the carve.",
+                "Multiplies how far the flashlight clears fog. 1 keeps the distance from the light's brightness and throw. Walls still stop the carve.",
                 new AcceptableValueRange<float>(0.1f, 5f)));
         CutRadius = Config.Bind(
             "Flashlight",

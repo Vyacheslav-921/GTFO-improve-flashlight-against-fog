@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+using CullingSystem;
+using GameData;
+using Gear;
 using Player;
 using UnityEngine;
 
@@ -37,10 +40,13 @@ sealed class FogCutWork
     const float Overlap = 1.2f;
     // The fog shader fades a sphere to nothing at its edge. A raw -4 only thins fog, which reads as a couple of meters.
     const float DensityScale = 8f;
-    // Illuminance falls with distance squared, so clear distance scales with sqrt(brightness).
+    // Illuminance falls with distance squared, so extra brightness stretches the clear with sqrt(intensity).
     // Brightness 1 is a white light at intensity 1 and clears about 14 m before the length modifier.
+    // Gun lights and the long range flashlight share a dim Unity intensity, so the throw also follows
+    // the authored range. A short Unity range must not pull a normal light down to a couple of meters.
     const float ReferenceBrightness = 1f;
     const float ReferenceReach = 14f;
+    const float MaxClear = 64f;
     const float MinClear = 4f;
     // Hits closer than this are the holder. The ray starts past them.
     const float NearSkip = 0.75f;
@@ -60,12 +66,15 @@ sealed class FogCutWork
 
     int _sampleCount;
     float _openReach;
+    float _beamRange;
+    float _loggedBrightness;
+    float _loggedRange;
+    int _beamLogs;
 
     int _used;
     int _beamMask;
     bool _beamMaskReady;
     bool _loggedBudget;
-    bool _loggedBeam;
     bool _loggedFailure;
 
     struct SphereWrite
@@ -242,29 +251,88 @@ sealed class FogCutWork
             return false;
         direction.Normalize();
 
-        float hardwareRange = 20f;
-        brightness = ReferenceBrightness;
-        if (light != null)
-        {
-            if (light.range > 1f)
-                hardwareRange = light.range;
-            float luminance = light.color.grayscale;
-            if (luminance < 0.05f)
-                luminance = 0.05f;
-            brightness = Mathf.Max(light.intensity, 0.01f) * luminance;
-        }
+        MeasureBeam(inventory, light, clustered, out brightness, out float hardwareRange);
 
         float length = Modifier(Plugin.CutLength.Value);
-        float clear = ReferenceReach * Mathf.Sqrt(brightness / ReferenceBrightness) * length;
-        // A short Unity light range must not pin the carve to a few meters. Walls still stop it.
-        float limit = Mathf.Max(hardwareRange, ReferenceReach) * length;
-        clear = Mathf.Clamp(clear, MinClear * length, limit);
+        float byBrightness = ReferenceReach * Mathf.Sqrt(brightness / ReferenceBrightness) * length;
+        // The long range flashlight's Unity intensity matches a weapon light, so brightness alone
+        // cleared both the same distance. Its throw is the longer authored range.
+        float byThrow = hardwareRange * length;
+        float clear = byBrightness > byThrow ? byBrightness : byThrow;
+        float floor = MinClear * length;
+        if (clear < floor)
+            clear = floor;
+        float ceiling = MaxClear * length;
+        if (clear > ceiling)
+            clear = ceiling;
+        _beamRange = hardwareRange;
 
         origin += direction * OriginBias;
         reach = Mathf.Max(clear - OriginBias, 1f);
         _openReach = reach;
         reach = StopAtGeometry(agent.GetInstanceID(), agent.transform, origin, direction, reach);
         return reach > MinRadius;
+    }
+
+    static void MeasureBeam(PlayerInventoryBase inventory, Light light, C_Light clustered, out float brightness, out float hardwareRange)
+    {
+        brightness = ReferenceBrightness;
+        hardwareRange = 20f;
+        if (light != null)
+        {
+            if (light.range > 1f)
+                hardwareRange = light.range;
+            brightness = Luminance(light.color, light.intensity);
+        }
+
+        GearPartFlashlight part = inventory.m_currentGearPartFlashlight;
+        if (part != null && FlashlightSettingsDataBlock.HasBlock(part.m_settingsID))
+        {
+            FlashlightSettingsDataBlock block = FlashlightSettingsDataBlock.GetBlock(part.m_settingsID);
+            if (block != null)
+            {
+                float authored = Luminance(block.color, block.intensity);
+                if (authored > brightness)
+                    brightness = authored;
+                if (block.range > hardwareRange)
+                    hardwareRange = block.range;
+            }
+        }
+
+        if (clustered == null || clustered.m_clusterLight == null)
+            return;
+        CL_SpotLight spot = clustered.m_clusterLight.TryCast<CL_SpotLight>();
+        if (spot == null)
+            return;
+
+        sCL_SpotLight data = spot.Data;
+        float irradiance = data.Irradiance.magnitude;
+        if (irradiance > brightness)
+            brightness = irradiance;
+        else
+        {
+            float scale = spot.m_lightScale.x;
+            if (scale > 1f)
+                brightness *= scale;
+        }
+
+        if (data.InvRangeSqr > 0.000001f)
+        {
+            float range = 1f / Mathf.Sqrt(data.InvRangeSqr);
+            if (range > hardwareRange && range < MaxClear)
+                hardwareRange = range;
+        }
+    }
+
+    static float Luminance(Color color, float intensity)
+    {
+        float luminance = color.grayscale;
+        if (luminance < 0.05f)
+            luminance = 0.05f;
+        float power = intensity;
+        if (power < 0.01f)
+            power = 0.01f;
+        return power * luminance;
     }
 
     static float Modifier(float value)
@@ -400,12 +468,16 @@ sealed class FogCutWork
         if (radius < needed)
             radius = needed;
 
-        if (!_loggedBeam)
+        bool changed = Mathf.Abs(_loggedBrightness - brightness) > 0.2f || Mathf.Abs(_loggedRange - _beamRange) > 2f;
+        if (_beamLogs < 4 && (_beamLogs == 0 || changed))
         {
-            _loggedBeam = true;
+            _beamLogs++;
+            _loggedBrightness = brightness;
+            _loggedRange = _beamRange;
             Plugin.Logger.LogInfo(
                 "Flashlight fog cut brightness " + brightness.ToString("0.00")
-                + ". Open " + _openReach.ToString("0.0")
+                + ", throw " + _beamRange.ToString("0.0")
+                + " m. Open " + _openReach.ToString("0.0")
                 + " m, after walls " + reach.ToString("0.0")
                 + " m, spheres " + count
                 + ", radius " + radius.ToString("0.0")
