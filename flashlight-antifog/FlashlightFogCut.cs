@@ -5,7 +5,7 @@ using Gear;
 using Player;
 using UnityEngine;
 
-namespace ImproveFlashlightAgainstFog;
+namespace FlashlightAntifog;
 
 // Il2Cpp injection only walks this behaviour. The carve lives on a plain class so ref structs
 // and out parameters are not converted into IL2CPP methods (that conversion was aborting Load).

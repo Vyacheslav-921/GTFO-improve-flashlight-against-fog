@@ -4,12 +4,12 @@ using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using Il2CppInterop.Runtime.Injection;
 
-namespace ImproveFlashlightAgainstFog;
+namespace FlashlightAntifog;
 
-[BepInPlugin(Plugin.Guid, "Improve Flashlight Against Fog", "1.4.6")]
+[BepInPlugin(Plugin.Guid, "flashlight-antifog", "1.4.6")]
 public sealed class Plugin : BasePlugin
 {
-    public const string Guid = "improveflashlightagainstfog";
+    public const string Guid = "flashlight-antifog";
 
     internal static ManualLogSource Logger;
 
@@ -87,6 +87,6 @@ public sealed class Plugin : BasePlugin
 
         ClassInjector.RegisterTypeInIl2Cpp<FlashlightFogCut>();
         AddComponent<FlashlightFogCut>();
-        Logger.LogInfo("Improve Flashlight Against Fog loaded.");
+        Logger.LogInfo("flashlight-antifog loaded.");
     }
 }

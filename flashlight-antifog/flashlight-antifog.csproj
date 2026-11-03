@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
-    <AssemblyName>ImproveFlashlightAgainstFog</AssemblyName>
-    <RootNamespace>ImproveFlashlightAgainstFog</RootNamespace>
+    <AssemblyName>flashlight-antifog</AssemblyName>
+    <RootNamespace>FlashlightAntifog</RootNamespace>
     <Version>1.0.0</Version>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -69,7 +69,7 @@
 
   <Target Name="DeployPlugin" AfterTargets="Build">
     <PropertyGroup>
-      <PluginOut>$(GameFolder)\BepInEx\plugins\ImproveFlashlightAgainstFog</PluginOut>
+      <PluginOut>$(GameFolder)\BepInEx\plugins\flashlight-antifog</PluginOut>
     </PropertyGroup>
     <MakeDir Directories="$(PluginOut)" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginOut)" SkipUnchangedFiles="false" />
